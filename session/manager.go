@@ -59,7 +59,6 @@ func (m *SessionManager) Setup() {
 // Add new session
 func (m *SessionManager) addSession(profile profile.PublicProfile) (s *Session, err error) {
 	s = &Session{
-
 		StreamKey:   profile.StreamKey,
 		StreamStart: time.Now(),
 
@@ -81,7 +80,7 @@ func (m *SessionManager) addSession(profile profile.PublicProfile) (s *Session, 
 }
 
 // Get the stream requested, or create it, and add it to the sessions context
-func (m *SessionManager) GetOrAddSession(profile profile.PublicProfile, isWHIP bool) (session *Session, err error) {
+func (m *SessionManager) GetOrAddSession(profile profile.PublicProfile) (session *Session, err error) {
 	session, ok := m.GetSessionByID(profile.StreamKey)
 
 	if !ok {

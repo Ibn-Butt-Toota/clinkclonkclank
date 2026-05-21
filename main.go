@@ -1,8 +1,7 @@
-package server
+package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/manager"
+	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/profile"
+	s "github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/session"
 	"github.com/pion/sdp/v3"
 	w "github.com/pion/webrtc/v4"
 )
@@ -19,6 +19,7 @@ import (
 const (
 	TCPPORT = 5004
 	UDPPORT = 5005
+	OUTPORT = 8000
 )
 
 func signalCandidate(addr string, candidate *w.ICECandidate) error {
@@ -65,9 +66,14 @@ func main() {
 
 	// whip for ingest
 	http.HandleFunc("/whip", func(res http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost && req.Method != http.MethodPatch && req.Method != http.MethodDelete {
+			res.WriteHeader(http.StatusMethodNotAllowed)
+			res.Write([]byte("Method not allowed"))
+			return
+		}
+
 		// userID is unused here...
-		userID, ok := checkReqAuth(res, req)
-		if !ok {
+		if !checkReqAuth(res, req) {
 			return
 		}
 
@@ -122,61 +128,31 @@ func main() {
 
 	// Start HTTP server with whip / whep endpoints
 	// nolint: gosec
-	go func() { panic(http.ListenAndServe(*offerAddr, nil)) }()
-
-	// Create an offer to send to the other process
-	offer, err := peerConnection.CreateOffer(nil)
-	if err != nil {
-		panic(err)
-	}
-
-	// Sets the LocalDescription, and starts our UDP listeners
-	// Note: this will start the gathering of ICE candidates
-	if err = peerConnection.SetLocalDescription(offer); err != nil {
-		panic(err)
-	}
-
-	// Send our offer to the HTTP server listening in the other process
-	payload, err := json.Marshal(offer)
-	if err != nil {
-		panic(err)
-	}
-	resp, err := http.Post( // nolint:noctx
-		fmt.Sprintf("http://%s/sdp", *answerAddr),
-		"application/json; charset=utf-8",
-		bytes.NewReader(payload),
-	)
-	if err != nil {
-		panic(err)
-	} else if err := resp.Body.Close(); err != nil {
-		panic(err)
-	}
+	go func() { panic(http.ListenAndServe("http://localhost/"+string(OUTPORT), nil)) }()
 
 	// Block forever
 	select {}
 }
 
-func checkReqAuth(res http.ResponseWriter, req *http.Request) (userID int, ok bool) {
+func checkReqAuth(res http.ResponseWriter, req *http.Request) (ok bool) {
 	tok := req.Header.Get("Authorization")
 	if !strings.HasPrefix(tok, "Bearer ") {
 		res.WriteHeader(http.StatusUnauthorized)
 		res.Write([]byte("Unauthorized"))
-		return -1, false
+		return false
 	}
 
-	// later make this userID be uuid7 or something idk figure it out later (this will be the user session ID)
-	return 1, true
+	return true
 }
 
 // Initialize WHIP session for incoming stream
 func whip(offer string) (parsedSDP string, sessionID string, err error) {
 	var parsed sdp.SessionDescription
 	if err := parsed.Unmarshal([]byte(offer)); err != nil {
-		http.Get("asdf.com")
 		return "", "", fmt.Errorf("Bad Response", http.StatusBadRequest)
 	}
 
-	session, err := manager.SessionsManager.GetOrAddSession(true)
+	session, err := s.SessionsManager.GetOrAddSession(profile.PublicProfile{})
 	if err != nil {
 		return "", "", err
 	}
