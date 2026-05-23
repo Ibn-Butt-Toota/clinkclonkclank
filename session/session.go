@@ -14,19 +14,20 @@ import (
 
 type (
 	Session struct {
-		// Protects StreamKey, MOTD, HasHost, IsPublic
+		// Protects streamID, MOTD, HasHost, IsPublic
 		StatusLock sync.RWMutex
-		StreamKey  string
+		streamID   string
 
-		MOTD        string
 		HasHost     atomic.Bool
-		IsPublic    bool
 		StreamStart time.Time
 
 		Host atomic.Pointer[WHIPSession]
 
 		closeOnce sync.Once
 		onClose   func()
+
+		// TODO: if you have a token + auth service, add the token to the session so you can auth when getting an existing session.
+		// myTok tokType
 
 		// Protects WHEPSessions
 		WHEPSessionsLock sync.RWMutex
@@ -42,9 +43,9 @@ func (session *Session) SetOnClose(onClose func()) {
 func (s *Session) AddWHEP(whepSessionID string, peerConnection *webrtc.PeerConnection, audioTrack *track.AudioTrack, RTCPSender *webrtc.RTPSender) (err error) {
 	slog.Info("WHIPSessionManager.WHIPSession.AddWHEPSession")
 
-	whepSession := CreateNewWHEP(
+	whepSession := CreateNewWHEPSession(
 		whepSessionID,
-		s.StreamKey,
+		s.streamID,
 		audioTrack,
 		peerConnection,
 	)
@@ -55,20 +56,8 @@ func (s *Session) AddWHEP(whepSessionID string, peerConnection *webrtc.PeerConne
 	s.WHEPSessions[whepSessionID] = whepSession
 	s.WHEPSessionsLock.Unlock()
 	s.updateHostWHEPSessionsSnapshot()
-	whepSession.RegisterWHEPHandlers(peerConnection)
-	go s.handleWHEPRTCPSender(whepSession, RTCPSender)
 
 	return nil
-}
-
-func (s *Session) handleWHEPRTCPSender(whepSession *WHEPSession, rtcpSender *webrtc.RTPSender) {
-	for {
-		_, _, err := rtcpSender.ReadRTCP()
-		if err != nil {
-			slog.Error("WHEPSession.ReadRTCP.Error", "err", err)
-			return
-		}
-	}
 }
 
 // Add host
@@ -96,7 +85,7 @@ func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (err error) {
 	}
 	host.SetOnClosed(s.handleHostClosed)
 
-	host.AddPeerConnection(peerConnection, s.StreamKey)
+	host.AddPeerConnection(peerConnection, s.streamID)
 	if !s.Host.CompareAndSwap(nil, host) {
 		host.RemovePeerConnection()
 		host.RemoveTracks()
@@ -113,11 +102,11 @@ func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (err error) {
 func (s *Session) RemoveHost() {
 	host := s.Host.Swap(nil)
 	if host == nil {
-		slog.Info("Session.RemoveHost", "streamKey", s.StreamKey, "msg", "No host to remove")
+		slog.Info("Session.RemoveHost", "streamID", s.streamID, "msg", "No host to remove")
 		return
 	}
 
-	slog.Info("Session.RemoveHost", "streamKey", s.StreamKey)
+	slog.Info("Session.RemoveHost", "streamKey", s.streamID)
 	s.HasHost.Store(false)
 
 	host.WHEPSessionsSnapshot.Store(make(map[string]*WHEPSession))
@@ -126,7 +115,7 @@ func (s *Session) RemoveHost() {
 }
 
 func (s *Session) handleWHEPClose(whepSessionID string) {
-	slog.Info("Session.HandleWHEPClose", "streamKey", s.StreamKey, "whepSessionID", whepSessionID)
+	slog.Info("Session.HandleWHEPClose", "streamID", s.streamID, "whepSessionID", whepSessionID)
 
 	s.WHEPSessionsLock.Lock()
 	_, ok := s.WHEPSessions[whepSessionID]
@@ -178,24 +167,19 @@ func (s *Session) close() {
 	})
 }
 
-func (s *Session) Close() {
-	slog.Info("Session.Close", "streamKey", s.StreamKey)
-	s.close()
-}
-
 // Returns true is no WHIP tracks are present, and no WHEP sessions are waiting for incoming streams
 func (s *Session) isEmpty() bool {
 	if s.hasWHEPSessions() {
-		slog.Info("Session.IsEmpty.HasWHEPSessions (false)", "streamKey", s.StreamKey)
+		slog.Info("Session.IsEmpty.HasWHEPSessions (false)", "streamID", s.streamID)
 		return false
 	}
 
 	if s.isStreaming() {
-		slog.Info("Session.IsEmpty.IsActive (false)", "streamKey", s.StreamKey)
+		slog.Info("Session.IsEmpty.IsActive (false)", "streamID", s.streamID)
 		return false
 	}
 
-	slog.Info("Session.IsEmpty (true)", "streamKey", s.StreamKey)
+	slog.Info("Session.IsEmpty (true)", "streamID", s.streamID)
 	return true
 }
 
@@ -260,18 +244,4 @@ func (s *Session) resetWHEPSessionsForNewHost() {
 		whepSession.ResetForNewPublisher()
 	}
 	s.WHEPSessionsLock.RUnlock()
-}
-
-// Get the status of the current session
-func (s *Session) GetStreamStatus() (status whipSessionStatus) {
-	s.StatusLock.RLock()
-
-	status = whipSessionStatus{
-		StreamKey:   s.StreamKey,
-		StreamStart: s.StreamStart,
-	}
-
-	s.StatusLock.RUnlock()
-
-	return
 }

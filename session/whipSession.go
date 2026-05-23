@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/track"
-	"github.com/google/uuid"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -30,10 +29,10 @@ type WHIPSession struct {
 	WHEPSessionsSnapshot atomic.Value
 }
 
-func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamKey string) {
+func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID string) {
 	id := remoteTrack.RID()
 
-	audioTrack, err := w.addAudioTrack(id, streamKey)
+	audioTrack, err := w.addAudioTrack(id, streamID)
 	if err != nil {
 		slog.Error("AudioWriter.AddTrack.Error", "err", err)
 		return
@@ -77,8 +76,8 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 }
 
 // Add a new AudioTrack to the WHIP session
-func (w *WHIPSession) addAudioTrack(rid string, streamKey string) (*track.AudioTrack, error) {
-	slog.Info("WHIPSession.AddAudioTrack", "streamKey", streamKey, "rid", rid)
+func (w *WHIPSession) addAudioTrack(rid string, streamID string) (*track.AudioTrack, error) {
+	slog.Info("WHIPSession.AddAudioTrack", "uid", streamID, "rid", rid)
 	w.TracksLock.Lock()
 	defer w.TracksLock.Unlock()
 
@@ -87,15 +86,15 @@ func (w *WHIPSession) addAudioTrack(rid string, streamKey string) (*track.AudioT
 	}
 
 	track := track.CreateAudioTrack(
-		"audio-"+uuid.New().String(),
+		"audio-"+string(streamID),
 		rid,
-		streamKey,
+		streamID,
 		webrtc.RTPCodecTypeAudio,
 	)
 
 	track.LastReceived.Store(time.Time{})
 
-	w.AudioTracks[track.Rid] = track
+	w.AudioTracks[track.RID()] = track
 
 	return track, nil
 }
@@ -121,11 +120,11 @@ func (w *WHIPSession) notifyClosed() {
 	})
 }
 
-func (w *WHIPSession) registerWHIPHandlers(peerConnection *webrtc.PeerConnection, streamKey string) {
+func (w *WHIPSession) registerWHIPHandlers(peerConnection *webrtc.PeerConnection, streamID string) {
 	slog.Info("WHIPSession.RegisterHandlers")
 
 	// PeerConnection OnTrack handler
-	w.PeerConnection.OnTrack(w.onTrackHandler(peerConnection, streamKey))
+	w.PeerConnection.OnTrack(w.onTrackHandler(peerConnection, streamID))
 
 	// PeerConnection OnICEConnectionStateChange handler
 	w.PeerConnection.OnICEConnectionStateChange(w.onICEConnectionStateChangeHandler())
@@ -143,13 +142,13 @@ func (w *WHIPSession) onICEConnectionStateChangeHandler() func(webrtc.ICEConnect
 	}
 }
 
-func (w *WHIPSession) onTrackHandler(peerConnection *webrtc.PeerConnection, streamKey string) func(*webrtc.TrackRemote, *webrtc.RTPReceiver) {
+func (w *WHIPSession) onTrackHandler(peerConnection *webrtc.PeerConnection, streamID string) func(*webrtc.TrackRemote, *webrtc.RTPReceiver) {
 	return func(remoteTrack *webrtc.TrackRemote, rtpReceiver *webrtc.RTPReceiver) {
 		slog.Info("WHIPSession.PeerConnection.OnTrackHandler", "id", w.ID)
 
 		if strings.HasPrefix(remoteTrack.Codec().MimeType, "audio") {
 			// Handle audio stream
-			w.audioWriter(remoteTrack, streamKey)
+			w.audioWriter(remoteTrack, streamID)
 		}
 
 		slog.Info("WHIPSession.OnTrackHandler.TrackStopped", "rid", remoteTrack.RID())
@@ -174,22 +173,22 @@ func (w *WHIPSession) onConnectionStateChange() func(webrtc.PeerConnectionState)
 	}
 }
 
-func (w *WHIPSession) AddPeerConnection(peerConnection *webrtc.PeerConnection, streamKey string) {
+func (w *WHIPSession) AddPeerConnection(pc *webrtc.PeerConnection, streamID string) {
 	slog.Info("WHIPSession.AddPeerConnection")
 
 	w.PeerConnectionLock.Lock()
-	existingPeerConnection := w.PeerConnection
-	w.PeerConnection = peerConnection
+	currPC := w.PeerConnection
+	w.PeerConnection = pc
 	w.PeerConnectionLock.Unlock()
 
-	if existingPeerConnection != nil && existingPeerConnection != peerConnection {
+	if currPC != nil && currPC != pc {
 		slog.Info("WHIPSession.AddPeerConnection: Replacing existing peerconnection")
-		if err := existingPeerConnection.GracefulClose(); err != nil {
+		if err := currPC.GracefulClose(); err != nil {
 			slog.Error("WHIPSession.AddPeerConnection.Close.Error", "err", err)
 		}
 	}
 
-	w.registerWHIPHandlers(peerConnection, streamKey)
+	w.registerWHIPHandlers(pc, streamID)
 }
 
 func (w *WHIPSession) RemovePeerConnection() {

@@ -14,13 +14,13 @@ import (
 
 // Status for an individual streaming session
 type whipSessionStatus struct {
-	StreamKey   string    `json:"streamKey"`
+	StreamID    string    `json:"streamID"`
 	StreamStart time.Time `json:"streamStart"`
 }
 
 type WHEPSession struct {
 	SessionID       string
-	StreamKey       string
+	StreamID        string
 	IsSessionClosed atomic.Bool
 
 	SessionClose sync.Once
@@ -39,9 +39,9 @@ type WHEPSession struct {
 }
 
 // Create and start a new WHEP session
-func CreateNewWHEP(
+func CreateNewWHEPSession(
 	whepSessionID string,
-	streamKey string,
+	streamID string,
 	audioTrack *track.AudioTrack,
 	peerConnection *webrtc.PeerConnection,
 ) (w *WHEPSession) {
@@ -49,7 +49,7 @@ func CreateNewWHEP(
 
 	w = &WHEPSession{
 		SessionID:      whepSessionID,
-		StreamKey:      streamKey,
+		StreamID:       streamID,
 		AudioTrack:     audioTrack,
 		AudioTimestamp: 5000,
 		PeerConnection: peerConnection,

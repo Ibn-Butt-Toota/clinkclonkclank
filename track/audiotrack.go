@@ -6,6 +6,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
+	w "github.com/pion/webrtc/v4"
 )
 
 type (
@@ -20,9 +21,9 @@ type (
 
 	AudioTrack struct {
 		id         string
-		Rid        string
+		rid        string
 		streamID   string
-		kind       webrtc.RTPCodecType
+		kind       w.RTPCodecType
 		errorCount int
 
 		TrackPacket     TrackPacket
@@ -31,9 +32,10 @@ type (
 		PacketsDropped  atomic.Uint64
 		LastReceived    atomic.Value
 
-		ssrc        webrtc.SSRC
-		writeStream webrtc.TrackLocalWriter
+		ssrc        w.SSRC
+		writeStream w.TrackLocalWriter
 
+		payloadTypeOpus    uint8
 		currentPayloadType uint8
 	}
 
@@ -44,14 +46,19 @@ type (
 	}
 )
 
-func CreateAudioTrack(id string, rid string, streamID string, kind webrtc.RTPCodecType) *AudioTrack {
+func CreateAudioTrack(id string, rid string, streamID string, kind w.RTPCodecType) *AudioTrack {
 	return &AudioTrack{
 		id:       id,
-		Rid:      rid,
+		rid:      rid,
 		streamID: streamID,
 		kind:     kind,
 	}
 }
+
+func (t *AudioTrack) ID() string                { return t.id }
+func (t *AudioTrack) RID() string               { return t.rid }
+func (t *AudioTrack) StreamID() string          { return t.streamID }
+func (t *AudioTrack) Kind() webrtc.RTPCodecType { return t.kind }
 
 func (t *AudioTrack) WriteRTP(packet *rtp.Packet) error {
 	packet.SSRC = uint32(t.ssrc)
@@ -66,5 +73,44 @@ func (t *AudioTrack) WriteRTP(packet *rtp.Packet) error {
 		}
 	}
 
+	return nil
+}
+
+func (t *AudioTrack) Bind(ctx w.TrackLocalContext) (w.RTPCodecParameters, error) {
+	t.ssrc = ctx.SSRC()
+	t.writeStream = ctx.WriteStream()
+
+	codecParameters := ctx.CodecParameters()
+	for parameters := range codecParameters {
+		t.payloadTypeOpus = uint8(codecParameters[parameters].PayloadType)
+		t.currentPayloadType = t.payloadTypeOpus
+		slog.Info("WHIPSession.TrackMultiCodec: Binding AudioTrack Type", "uid", t.streamID, "payloadType", t.currentPayloadType)
+
+		t.kind = w.RTPCodecTypeAudio
+		return w.RTPCodecParameters{
+			PayloadType: codecParameters[parameters].PayloadType,
+			RTPCodecCapability: w.RTPCodecCapability{
+				MimeType:     codecParameters[parameters].MimeType,
+				RTCPFeedback: codecParameters[parameters].RTCPFeedback,
+				ClockRate:    codecParameters[parameters].ClockRate,
+				SDPFmtpLine:  codecParameters[parameters].SDPFmtpLine,
+			},
+		}, nil
+	}
+
+	// return a hardcoded codec because this is the only codec that should be bound
+	return w.RTPCodecParameters{
+		RTPCodecCapability: w.RTPCodecCapability{
+			MimeType:     w.MimeTypeOpus,
+			ClockRate:    48000,
+			Channels:     1, // TODO: mono for now
+			SDPFmtpLine:  "",
+			RTCPFeedback: nil,
+		},
+		PayloadType: 101,
+	}, nil
+}
+
+func (t *AudioTrack) Unbind(context w.TrackLocalContext) error {
 	return nil
 }

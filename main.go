@@ -2,24 +2,39 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/profile"
 	s "github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/session"
-	"github.com/pion/sdp/v3"
+	"github.com/pion/ice/v4"
 	w "github.com/pion/webrtc/v4"
 )
 
 const (
 	TCPPORT = 5004
 	UDPPORT = 5005
-	OUTPORT = 8000
+
+	TCP_MUX_ADDR = "127.0.0.1"
+	HTTP_ADDRESS = ":8080"
+)
+
+var (
+	API   *w.API
+	CODEC = w.RTPCodecParameters{
+		RTPCodecCapability: w.RTPCodecCapability{
+			MimeType:     w.MimeTypeOpus,
+			ClockRate:    48000,
+			Channels:     1, // TODO: mono for now
+			SDPFmtpLine:  "",
+			RTCPFeedback: nil,
+		},
+		PayloadType: 101,
+	}
 )
 
 func signalCandidate(addr string, candidate *w.ICECandidate) error {
@@ -43,17 +58,59 @@ func main() {
 	se.SetLite(true)
 	se.SetNetworkTypes([]w.NetworkType{w.NetworkTypeTCP4, w.NetworkTypeUDP4})
 
-	// setting tcp and udp muxes
-	tcpListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: TCPPORT})
-	se.SetICETCPMux(w.NewICETCPMux(nil, tcpListener, 8))
+	udpMuxCache := map[int]*ice.MultiUDPMuxDefault{}
+	tcpMuxCache := map[string]ice.TCPMux{}
 
-	udpListener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: UDPPORT})
-	se.SetICEUDPMux(w.NewICEUDPMux(nil, udpListener))
+	// setup udp mux port
+	udpMux, ok := udpMuxCache[UDPPORT]
+	if !ok {
+		udpMux, err := ice.NewMultiUDPMuxFromPort(UDPPORT)
+		if err != nil {
+			slog.Error("Config error", "err", err)
+			os.Exit(1)
+		}
 
-	api := w.NewAPI(w.WithSettingEngine(se))
+		udpMuxCache[UDPPORT] = udpMux
+	}
+
+	se.SetICEUDPMux(udpMux)
+
+	// setup tcp mux port
+	tcpMux, ok := tcpMuxCache[TCP_MUX_ADDR]
+	if !ok {
+		tcpAddr, err := net.ResolveTCPAddr("tcp", TCP_MUX_ADDR)
+		if err != nil {
+			slog.Error("TCP Listen error", "err", err)
+			os.Exit(1)
+		}
+
+		tcpListener, err := net.ListenTCP("tcp", tcpAddr)
+		if err != nil {
+			slog.Error("TCP Listen error", "err", err)
+			os.Exit(1)
+		}
+
+		tcpMux = w.NewICETCPMux(nil, tcpListener, 8)
+		tcpMuxCache[TCP_MUX_ADDR] = tcpMux
+	}
+
+	se.SetICETCPMux(tcpMux)
+
+	// set up mediaEngine to take in opus only
+	me := &w.MediaEngine{}
+	if err := me.RegisterCodec(CODEC, w.RTPCodecTypeAudio); err != nil {
+		panic(err) // explode
+	}
+
+	// TODO: set up interceptors ?
+
+	API = w.NewAPI(
+		w.WithMediaEngine(me),
+		w.WithSettingEngine(se),
+	)
 
 	// create the peerConnection
-	peerConnection, err := api.NewPeerConnection(w.Configuration{})
+	peerConnection, err := API.NewPeerConnection(w.Configuration{})
 	if err != nil {
 		panic(err)
 	}
@@ -64,136 +121,40 @@ func main() {
 		}
 	}()
 
+	// set up to store sessions
+	s.SessionsManager.Setup()
+
+	// set up the http server
+	serverMux := http.NewServeMux()
+
 	// whip for ingest
-	http.HandleFunc("/whip", func(res http.ResponseWriter, req *http.Request) {
-		if req.Method != http.MethodPost && req.Method != http.MethodPatch && req.Method != http.MethodDelete {
-			res.WriteHeader(http.StatusMethodNotAllowed)
-			res.Write([]byte("Method not allowed"))
-			return
-		}
-
-		// userID is unused here...
-		if !checkReqAuth(res, req) {
-			return
-		}
-
-		// read the SDP request
-		offer, err := io.ReadAll(req.Body)
-		if err != nil || string(offer) == "" {
-			res.WriteHeader(http.StatusBadRequest)
-			res.Write([]byte("Error reading offer"))
-			return
-		}
-
-		whipAnswer, sessionID, err := whip(string(offer))
-		if err != nil {
-			res.WriteHeader(http.StatusInternalServerError)
-			res.Write([]byte("Could not begin whip"))
-			return
-		}
-
-		res.Header().Add("Content-Type", "application/sdp")
-		res.WriteHeader(http.StatusCreated)
-		// idk
-		res.Write([]byte(whipAnswer + "," + sessionID))
-
-		return
-	})
+	serverMux.HandleFunc("/whip", corsHandler(whipHandler))
 
 	// whep for playback
-	http.HandleFunc("/whep", func(res http.ResponseWriter, req *http.Request) {
-		print("tup")
-	})
+	serverMux.HandleFunc("/whep", corsHandler(whepHandler))
 
-	// Set the handler for Peer connection state
-	// This will notify you when the peer has connected/disconnected
-	peerConnection.OnConnectionStateChange(func(state w.PeerConnectionState) {
-		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
+	// eventually add fronend
+	// frontendHandler, err := newFrontendHandler()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// serverMux.Handle("/", frontendHandler)
 
-		if state == w.PeerConnectionStateFailed {
-			// Wait until PeerConnection has had no network activity for 30 seconds or another failure.
-			// It may be reconnected using an ICE Restart.
-			// Use w.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
-			fmt.Println("Peer Connection has gone to failed exiting")
-			os.Exit(0)
-		}
-
-		if state == w.PeerConnectionStateClosed {
-			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
-			fmt.Println("Peer Connection has gone to closed exiting")
-			os.Exit(0)
-		}
-	})
-
-	// Start HTTP server with whip / whep endpoints
-	// nolint: gosec
-	go func() { panic(http.ListenAndServe("http://localhost/"+string(OUTPORT), nil)) }()
-
-	// Block forever
-	select {}
+	// start http server
+	server := &http.Server{
+		Handler: serverMux,
+		Addr:    HTTP_ADDRESS,
+	}
+	log.Fatal(server.ListenAndServe())
 }
 
-func checkReqAuth(res http.ResponseWriter, req *http.Request) (ok bool) {
-	tok := req.Header.Get("Authorization")
+func checkReqAuth(res http.ResponseWriter, req *http.Request) (tok string, ok bool) {
+	tok = req.Header.Get("Authorization")
 	if !strings.HasPrefix(tok, "Bearer ") {
 		res.WriteHeader(http.StatusUnauthorized)
 		res.Write([]byte("Unauthorized"))
-		return false
+		return tok, false
 	}
 
-	return true
-}
-
-// Initialize WHIP session for incoming stream
-func whip(offer string) (parsedSDP string, sessionID string, err error) {
-	var parsed sdp.SessionDescription
-	if err := parsed.Unmarshal([]byte(offer)); err != nil {
-		return "", "", fmt.Errorf("Bad Response", http.StatusBadRequest)
-	}
-
-	session, err := s.SessionsManager.GetOrAddSession(profile.PublicProfile{})
-	if err != nil {
-		return "", "", err
-	}
-
-	peerConnection, err := w.NewPeerConnection(w.Configuration{})
-	if err != nil || peerConnection == nil {
-		if peerConnection != nil {
-			if closeErr := peerConnection.Close(); closeErr != nil {
-				fmt.Printf("WHIP NewPeerConnection Close Failed %v", closeErr)
-			}
-		}
-		return "", "", err
-	}
-
-	if err := session.AddHost(peerConnection); err != nil {
-		return "", "", err
-	}
-
-	host := session.Host.Load()
-	if host == nil {
-		return "", "", errors.New("host session not available")
-	}
-
-	// add dtx (opus discontinuous transmission) to the sdp to prevent sending audio packets if it's silent
-	if !strings.Contains(parsedSDP, ";usedtx=1") {
-		parsedSDP += ";usedtx=1"
-	}
-	return parsedSDP, host.ID, nil
-}
-
-func setupDataChannel(dataChannel *w.DataChannel) {
-	// Register channel opening handling
-	dataChannel.OnOpen(func() {
-		fmt.Printf(
-			"Chat started.",
-			dataChannel.Label(), dataChannel.ID(),
-		)
-	})
-
-	// Register text message handling
-	dataChannel.OnMessage(func(msg w.DataChannelMessage) {
-		fmt.Printf("Message from DataChannel '%s': '%s'\n", dataChannel.Label(), string(msg.Data))
-	})
+	return tok, true
 }

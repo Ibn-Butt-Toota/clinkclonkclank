@@ -2,12 +2,12 @@ package session
 
 import (
 	"log/slog"
-	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/profile"
 	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/track"
+	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -20,6 +20,7 @@ var (
 
 type (
 	SessionManager struct {
+		SessionCount atomic.Int64
 		sessionsLock sync.RWMutex
 		sessions     map[string]*Session
 	}
@@ -57,9 +58,11 @@ func (m *SessionManager) Setup() {
 }
 
 // Add new session
-func (m *SessionManager) addSession(profile profile.PublicProfile) (s *Session, err error) {
+func (m *SessionManager) addSession() (s *Session, err error) {
+	streamID := uuid.New().String()
+
 	s = &Session{
-		StreamKey:   profile.StreamKey,
+		streamID:    streamID,
 		StreamStart: time.Now(),
 
 		WHEPSessions: map[string]*WHEPSession{},
@@ -68,94 +71,42 @@ func (m *SessionManager) addSession(profile profile.PublicProfile) (s *Session, 
 	s.SetOnClose(func() {
 		slog.Info("SessionManager.Session.Done")
 		m.sessionsLock.Lock()
-		delete(m.sessions, profile.StreamKey)
+		delete(m.sessions, streamID)
 		m.sessionsLock.Unlock()
 	})
 
 	m.sessionsLock.Lock()
-	m.sessions[profile.StreamKey] = s
+	m.sessions[streamID] = s
 	m.sessionsLock.Unlock()
+
+	m.SessionCount.Add(1)
 
 	return s, nil
 }
 
 // Get the stream requested, or create it, and add it to the sessions context
-func (m *SessionManager) GetOrAddSession(profile profile.PublicProfile) (session *Session, err error) {
-	session, ok := m.GetSessionByID(profile.StreamKey)
+func (m *SessionManager) GetOrAddSession(streamID string) (session *Session, err error) {
+	session, foundSession := m.GetSessionByID(streamID)
 
-	if !ok {
-		slog.Info("SessionManager.GetOrAddStream: Adding", "streamKey", profile.StreamKey)
-		session, err = m.addSession(profile)
+	if !foundSession {
+		slog.Info("SessionManager.GetOrAddStream: Adding", "uid", streamID)
+		session, err = m.addSession()
 	}
 
 	return session, err
 }
 
 // Get Session by id
-func (m *SessionManager) GetSessionByID(streamKey string) (session *Session, foundSession bool) {
-	slog.Info("SessionManager.GetSessionByID", "streamKey", streamKey)
+func (m *SessionManager) GetSessionByID(streamID string) (session *Session, foundSession bool) {
+	if streamID == "" {
+		return session, foundSession
+	}
 
 	m.sessionsLock.RLock()
 	defer m.sessionsLock.RUnlock()
 
-	session, foundSession = m.sessions[streamKey]
+	session, foundSession = m.sessions[streamID]
 	return session, foundSession
-}
-
-// Gets the current state of all sessions
-func (m *SessionManager) GetSessionStates(includePrivateStreams bool) (result []StreamSessionState) {
-	slog.Info("SessionManager.GetSessionStates", "isAdmin", includePrivateStreams)
-	m.sessionsLock.RLock()
-	copiedSessions := make(map[string]*Session)
-	maps.Copy(copiedSessions, m.sessions)
-	m.sessionsLock.RUnlock()
-
-	for _, s := range copiedSessions {
-		s.StatusLock.RLock()
-
-		if !includePrivateStreams && !s.IsPublic {
-			s.StatusLock.RUnlock()
-			continue
-		}
-
-		streamSession := StreamSessionState{
-			StreamKey:   s.StreamKey,
-			StreamStart: s.StreamStart,
-			Sessions:    []SessionState{},
-			AudioTracks: []track.AudioTrackState{},
-		}
-
-		s.StatusLock.RUnlock()
-
-		host := s.Host.Load()
-		if host != nil {
-			host.TracksLock.RLock()
-
-			for _, audioTrack := range host.AudioTracks {
-				streamSession.AudioTracks = append(
-					streamSession.AudioTracks,
-					track.AudioTrackState{
-						Rid:             audioTrack.Rid,
-						PacketsReceived: audioTrack.PacketsReceived.Load(),
-						PacketsDropped:  audioTrack.PacketsDropped.Load(),
-					})
-			}
-
-			host.TracksLock.RUnlock()
-		}
-
-		s.WHEPSessionsLock.RLock()
-		for _, whep := range s.WHEPSessions {
-			if !whep.IsSessionClosed.Load() {
-				streamSession.Sessions = append(streamSession.Sessions, whep.GetWHEPSessionStatus())
-			}
-		}
-		s.WHEPSessionsLock.RUnlock()
-
-		result = append(result, streamSession)
-	}
-
-	return
 }
 
 // Get Session by id
