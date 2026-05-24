@@ -12,6 +12,7 @@ import (
 
 	s "github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/session"
 	"github.com/pion/ice/v4"
+	"github.com/pion/interceptor"
 	w "github.com/pion/webrtc/v4"
 )
 
@@ -33,7 +34,7 @@ var (
 			SDPFmtpLine:  "",
 			RTCPFeedback: nil,
 		},
-		PayloadType: 101,
+		PayloadType: 111,
 	}
 )
 
@@ -52,6 +53,7 @@ func signalCandidate(addr string, candidate *w.ICECandidate) error {
 }
 
 func main() {
+	// PREPARE WEBRTC API
 	se := w.SettingEngine{}
 
 	// use ice-lite since i don't need NAT traversal
@@ -102,10 +104,15 @@ func main() {
 		panic(err) // explode
 	}
 
-	// TODO: set up interceptors ?
+	// set up interceptors
+	ir := &interceptor.Registry{}
+	if err := w.RegisterDefaultInterceptors(me, ir); err != nil {
+		panic(err) // explode
+	}
 
 	API = w.NewAPI(
 		w.WithMediaEngine(me),
+		w.WithInterceptorRegistry(ir),
 		w.WithSettingEngine(se),
 	)
 
