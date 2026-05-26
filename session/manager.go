@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	SessionsManager *SessionManager
+	SessionsManager = &SessionManager{}
 
 	APIWHIP *webrtc.API
 	APIWHEP *webrtc.API
@@ -80,6 +80,7 @@ func (m *SessionManager) addSession() (s *Session, err error) {
 	m.sessionsLock.Unlock()
 
 	m.SessionCount.Add(1)
+	slog.Info("SessionManager.addSession: Adding", "uid", streamID)
 
 	return s, nil
 }
@@ -89,7 +90,6 @@ func (m *SessionManager) GetOrAddSession(streamID string) (session *Session, err
 	session, foundSession := m.GetSessionByID(streamID)
 
 	if !foundSession {
-		slog.Info("SessionManager.GetOrAddStream: Adding", "uid", streamID)
 		session, err = m.addSession()
 	}
 

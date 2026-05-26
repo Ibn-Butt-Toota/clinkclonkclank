@@ -10,15 +10,18 @@ import (
 	s "github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/session"
 	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/track"
 	"github.com/google/uuid"
-	"github.com/pion/sdp/v3"
 	w "github.com/pion/webrtc/v4"
+)
+
+var (
+	errBadResponse = errors.New("bad response")
 )
 
 func corsHandler(next func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(res http.ResponseWriter, req *http.Request) {
 		res.Header().Set("Access-Control-Allow-Origin", "*")
 		res.Header().Set("Access-Control-Allow-Methods", "*")
-		res.Header().Set("Access-Control-Allow-Headers", "*")
+		res.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Session-ID")
 		res.Header().Set("Access-Control-Expose-Headers", "*")
 
 		if req.Method != http.MethodOptions {
@@ -52,6 +55,7 @@ func whipHandler(res http.ResponseWriter, req *http.Request) {
 
 	whipAnswer, sessionID, err := whip(string(offer), sessionID)
 	if err != nil {
+		slog.Error("whip failed", "err", err)
 		res.WriteHeader(http.StatusInternalServerError)
 		res.Write([]byte("Could not begin whip"))
 		return
@@ -69,11 +73,6 @@ func whipHandler(res http.ResponseWriter, req *http.Request) {
 
 // Initialize WHIP session for incoming stream
 func whip(offer string, streamID string) (parsedSDP string, sessionID string, err error) {
-	var parsed sdp.SessionDescription
-	if err := parsed.UnmarshalString(offer); err != nil {
-		return "", "", fmt.Errorf("Bad Response", http.StatusBadRequest)
-	}
-
 	session, err := s.SessionsManager.GetOrAddSession(streamID)
 	if err != nil {
 		return "", "", err
@@ -128,7 +127,7 @@ func whip(offer string, streamID string) (parsedSDP string, sessionID string, er
 	// await gathering ice
 	<-gatheringComplete
 
-	return parsedSDP, host.ID, nil
+	return pc.LocalDescription().SDP, host.ID, nil
 }
 
 func whepHandler(res http.ResponseWriter, req *http.Request) {
@@ -156,8 +155,9 @@ func whepHandler(res http.ResponseWriter, req *http.Request) {
 
 	whipAnswer, sessionID, err := whep(string(offer), sessionID, tok)
 	if err != nil {
+		slog.Error("whep failed", "err", err)
 		res.WriteHeader(http.StatusInternalServerError)
-		res.Write([]byte("Could not begin whip"))
+		res.Write([]byte("Could not begin whep"))
 		return
 	}
 
@@ -173,11 +173,6 @@ func whepHandler(res http.ResponseWriter, req *http.Request) {
 
 // Initialize WHIP session for incoming stream
 func whep(offer string, streamID string, token string) (parsedSDP string, sessionID string, err error) {
-	var parsed sdp.SessionDescription
-	if err := parsed.UnmarshalString(offer); err != nil {
-		return "", "", fmt.Errorf("Bad Response", http.StatusBadRequest)
-	}
-
 	session, err := s.SessionsManager.GetOrAddSession(streamID)
 	if err != nil {
 		return "", "", err
@@ -238,5 +233,5 @@ func whep(offer string, streamID string, token string) (parsedSDP string, sessio
 	// await gathering ice
 	<-gatheringComplete
 
-	return parsedSDP, whepSessionID, nil
+	return pc.LocalDescription().SDP, whepSessionID, nil
 }

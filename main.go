@@ -21,11 +21,10 @@ import (
 var assets embed.FS
 
 const (
-	TCPPORT = 5004
-	UDPPORT = 5005
-
-	TCP_MUX_ADDR = "127.0.0.1"
-	HTTP_ADDRESS = ":8080"
+	TCPPORT      int = 5004
+	UDPPORT      int = 5005
+	TCP_MUX_ADDR     = "127.0.0.1"
+	HTTP_ADDRESS     = ":8080"
 )
 
 var (
@@ -34,7 +33,7 @@ var (
 		RTPCodecCapability: w.RTPCodecCapability{
 			MimeType:     w.MimeTypeOpus,
 			ClockRate:    48000,
-			Channels:     1, // TODO: mono for now
+			Channels:     2,
 			SDPFmtpLine:  "",
 			RTCPFeedback: nil,
 		},
@@ -70,7 +69,8 @@ func main() {
 	// setup udp mux port
 	udpMux, ok := udpMuxCache[UDPPORT]
 	if !ok {
-		udpMux, err := ice.NewMultiUDPMuxFromPort(UDPPORT)
+		var err error
+		udpMux, err = ice.NewMultiUDPMuxFromPort(UDPPORT)
 		if err != nil {
 			slog.Error("Config error", "err", err)
 			os.Exit(1)
@@ -84,7 +84,7 @@ func main() {
 	// setup tcp mux port
 	tcpMux, ok := tcpMuxCache[TCP_MUX_ADDR]
 	if !ok {
-		tcpAddr, err := net.ResolveTCPAddr("tcp", TCP_MUX_ADDR)
+		tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", TCP_MUX_ADDR, TCPPORT))
 		if err != nil {
 			slog.Error("TCP Listen error", "err", err)
 			os.Exit(1)
