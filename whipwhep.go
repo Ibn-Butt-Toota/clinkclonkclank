@@ -115,6 +115,7 @@ func whip(offer string, streamID string) (parsedSDP string, sessionID string, er
 		return "", "", err
 	}
 
+	// this adds the peerConnectionHandlers.
 	if err := session.AddHost(pc); err != nil {
 		return "", "", err
 	}

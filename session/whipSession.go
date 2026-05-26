@@ -4,14 +4,17 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/track"
-	"github.com/pion/rtp"
+	"github.com/pion/opus"
+	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 )
 
 type WHIPSession struct {
@@ -38,26 +41,49 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 		return
 	}
 
-	rtpPkt := &rtp.Packet{}
-	rtpBuf := make([]byte, 1500)
+	// sample interval * khz * channels
+	pcm := make([]byte, 20*48*2)
+
+	sb := samplebuilder.New(10, &codecs.OpusPacket{}, 48000)
+	opusToPCM := opus.NewDecoder()
+
+	// create the output file
+	file, err := os.Create("output")
+	if err != nil {
+		return
+	}
+
 	for {
-		rtpRead, _, err := remoteTrack.Read(rtpBuf)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+		pkt, _, readErr := remoteTrack.ReadRTP()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
 				slog.Info("WHIPSession.AudioWriter.RtpPkt.EndOfStream")
 				return
-			} else {
-				slog.Error("WHIPSession.AudioWriter.RtpPkt.Err", "err", err)
+			}
+
+			slog.Error("WHIPSession.AudioWriter error while reading rtp packets", "err", readErr)
+		}
+
+		sb.Push(pkt)
+
+		// for each sample, decode it to PCM
+		for {
+			sample := sb.Pop()
+			if sample == nil {
+				break
+			}
+
+			// sample.Data contains the raw opus data
+			if _, _, err := opusToPCM.Decode(sample.Data, pcm); err != nil {
+				slog.Error("Error while decoding raw opus to PCM", "err", err)
+			}
+
+			if _, err := file.Write(pcm); err != nil {
+				slog.Error("Error while writing PCM to output file", file, "err", err)
 			}
 		}
 
 		audioTrack.PacketsReceived.Add(1)
-
-		err = rtpPkt.Unmarshal(rtpBuf[:rtpRead])
-		if err != nil {
-			slog.Error("WHIPSession.AudioWriter.RtpPkt.Error", "err", err)
-			continue
-		}
 
 		var sessions map[string]*WHEPSession
 		if sessionsAny := w.WHEPSessionsSnapshot.Load(); sessionsAny != nil {
@@ -66,7 +92,7 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 
 		packet := track.TrackPacket{
 			Layer:  id,
-			Packet: rtpPkt,
+			Packet: pkt,
 		}
 
 		for _, whepSession := range sessions {

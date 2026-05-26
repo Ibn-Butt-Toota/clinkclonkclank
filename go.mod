@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pion/ice/v4 v4.2.5
 	github.com/pion/interceptor v0.1.45
+	github.com/pion/opus v0.0.0-20260521201147-ee1d1deea2f6
 	github.com/pion/rtp v1.10.2
 	github.com/pion/webrtc/v4 v4.2.13
 )

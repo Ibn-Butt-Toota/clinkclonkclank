@@ -85,7 +85,7 @@ func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (err error) {
 	}
 	host.SetOnClosed(s.handleHostClosed)
 
-	host.AddPeerConnection(peerConnection, s.streamID)
+	host.AddPeerConnection(peerConnection, host.ID)
 	if !s.Host.CompareAndSwap(nil, host) {
 		host.RemovePeerConnection()
 		host.RemoveTracks()
