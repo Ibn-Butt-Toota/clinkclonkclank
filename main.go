@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"log"
 	"log/slog"
@@ -15,6 +16,9 @@ import (
 	"github.com/pion/interceptor"
 	w "github.com/pion/webrtc/v4"
 )
+
+//go:embed assets
+var assets embed.FS
 
 const (
 	TCPPORT = 5004
@@ -34,7 +38,7 @@ var (
 			SDPFmtpLine:  "",
 			RTCPFeedback: nil,
 		},
-		PayloadType: 111,
+		PayloadType: 111, // this is dynamic; anything between [96-127] is fine
 	}
 )
 
@@ -134,18 +138,15 @@ func main() {
 	// set up the http server
 	serverMux := http.NewServeMux()
 
+	// frontend
+	ass := http.FileServer(http.FS(assets))
+	serverMux.Handle("/", ass)
+
 	// whip for ingest
 	serverMux.HandleFunc("/whip", corsHandler(whipHandler))
 
 	// whep for playback
 	serverMux.HandleFunc("/whep", corsHandler(whepHandler))
-
-	// eventually add fronend
-	// frontendHandler, err := newFrontendHandler()
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// serverMux.Handle("/", frontendHandler)
 
 	// start http server
 	server := &http.Server{
