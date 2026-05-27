@@ -1,10 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,22 +53,37 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 		return
 	}
 
-	// create the output file
-	file, err := os.Create("output.pcm")
-	if err != nil {
-		return
-	}
-
 	// buffer the packets in the channel because we need to read as fast as we can.
 	packets := make(chan *rtp.Packet, 100)
 
+	// decent, but slow. ~1s delay.
+	// build qwen_asr by following the steps here: https://github.com/antirez/qwen-asr
+	// asr := exec.Command("./qwen_asr", "-d", "qwen3-asr-1.7b", "--stdin", "--stream", "--silent", "--enc-window-sec", "2", "--stream-max-new-tokens", "48")
+
+	// parses faster but only once the stdin pipe is completed...
+	// `brew install cargo`
+	// `cargo install qwen-asr-cli`
+	asr := exec.Command("qwen-asr", "-d", "qwen3-asr-0.6b", "--stdin", "--stream", "--vad", "--enc-window-sec", "2", "--stream-chunk-sec", "2")
+
+	pcmToASR, err := asr.StdinPipe()
+	if err != nil {
+		slog.Error("Failed to create stdin pipe for ASR", "err", err)
+		return
+	}
+
+	asr.Stdout = os.Stdout
+	asr.Stderr = os.Stdout
+
 	slog.Info("Beginning to read RTP from the user")
+
 	go func() {
 		for {
 			pkt, _, readErr := remoteTrack.ReadRTP()
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) {
 					slog.Info("WHIPSession.AudioWriter.RtpPkt.EndOfStream")
+					packets <- nil
+
 					return
 				}
 
@@ -78,10 +95,21 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 		}
 	}()
 
+	startedASR := false
+	var recording bytes.Buffer
+	// we want to write to the recording and the ASR command's stdin
+	mw := io.MultiWriter(pcmToASR, &recording)
+
 	slog.Info("Decoding Opus to PCM")
+
+outer:
 	for {
 		select {
 		case pkt := <-packets:
+			if pkt == nil {
+				break outer
+			}
+
 			var sessions map[string]*WHEPSession
 			if sessionsAny := w.WHEPSessionsSnapshot.Load(); sessionsAny != nil {
 				sessions = sessionsAny.(map[string]*WHEPSession)
@@ -110,16 +138,40 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 					slog.Error("Error while decoding raw opus to PCM", "err", err)
 				}
 
-				if _, err := file.Write(pcm); err != nil {
-					slog.Error("Error while writing PCM to output file", file, "err", err)
+				if _, err := mw.Write(pcm); err != nil {
+					slog.Error("Error while writing pcm to ASR.stdin or recording buffer")
 				}
+			}
+
+			if !startedASR {
+				go func() {
+					if err := asr.Run(); err != nil {
+						slog.Error("ASR failed to start", "err", err)
+						return
+					}
+				}()
+
+				slog.Info("Starting ASR")
+				startedASR = true
 			}
 		}
 	}
-}
 
-func decodeFromSampleBuilder(sb *samplebuilder.SampleBuilder, decoder opus.Decoder, pcm []byte, file *os.File) {
+	slog.Info("Stream done")
+	if closeErr := pcmToASR.Close(); closeErr != nil {
+		slog.Error("Error while closing ASR stdin")
+	}
 
+	// at this point the stream must've stopped, so write the file to memory
+	file, err := os.Create(streamID + ".pcm")
+	if err != nil {
+		return
+	}
+
+	slog.Info("Writing to file", "file", file.Name())
+	if _, err := file.Write(recording.Bytes()); err != nil {
+		slog.Error("WHIPSession.audioWriter.writeRecording", "err", err)
+	}
 }
 
 // Add a new AudioTrack to the WHIP session

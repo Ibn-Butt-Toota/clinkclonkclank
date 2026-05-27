@@ -1,5 +1,5 @@
 *.pcm
-qwen3-*
+qwen*
 
 .vscode
 .DS_Store
