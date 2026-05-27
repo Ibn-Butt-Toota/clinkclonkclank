@@ -1,1 +1,5 @@
-output
+*.pcm
+qwen3-*
+
+.vscode
+.DS_Store

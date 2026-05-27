@@ -103,11 +103,11 @@ func (t *AudioTrack) Bind(ctx w.TrackLocalContext) (w.RTPCodecParameters, error)
 		RTPCodecCapability: w.RTPCodecCapability{
 			MimeType:     w.MimeTypeOpus,
 			ClockRate:    48000,
-			Channels:     1, // TODO: mono for now
+			Channels:     2,
 			SDPFmtpLine:  "",
 			RTCPFeedback: nil,
 		},
-		PayloadType: 101,
+		PayloadType: 111,
 	}, nil
 }
 

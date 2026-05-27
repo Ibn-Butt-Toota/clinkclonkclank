@@ -12,6 +12,7 @@ import (
 
 	"github.com/FARTFARTFARTFARTFARTFARTFARTFARTFARTFRT/clinkclonkclank/track"
 	"github.com/pion/opus"
+	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
@@ -42,63 +43,83 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 	}
 
 	// sample interval * khz * channels
-	pcm := make([]byte, 20*48*2)
+	pcm := make([]byte, 20*16*2)
 
 	sb := samplebuilder.New(10, &codecs.OpusPacket{}, 48000)
-	opusToPCM := opus.NewDecoder()
-
-	// create the output file
-	file, err := os.Create("output")
+	opusToPCM, err := opus.NewDecoderWithOutput(16000, 1)
 	if err != nil {
 		return
 	}
 
-	for {
-		pkt, _, readErr := remoteTrack.ReadRTP()
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				slog.Info("WHIPSession.AudioWriter.RtpPkt.EndOfStream")
-				return
-			}
+	// create the output file
+	file, err := os.Create("output.pcm")
+	if err != nil {
+		return
+	}
 
-			slog.Error("WHIPSession.AudioWriter error while reading rtp packets", "err", readErr)
-		}
+	// buffer the packets in the channel because we need to read as fast as we can.
+	packets := make(chan *rtp.Packet, 100)
 
-		sb.Push(pkt)
-
-		// for each sample, decode it to PCM
+	slog.Info("Beginning to read RTP from the user")
+	go func() {
 		for {
-			sample := sb.Pop()
-			if sample == nil {
-				break
+			pkt, _, readErr := remoteTrack.ReadRTP()
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					slog.Info("WHIPSession.AudioWriter.RtpPkt.EndOfStream")
+					return
+				}
+
+				slog.Error("WHIPSession.AudioWriter error while reading rtp packets", "err", readErr)
 			}
 
-			// sample.Data contains the raw opus data
-			if _, _, err := opusToPCM.Decode(sample.Data, pcm); err != nil {
-				slog.Error("Error while decoding raw opus to PCM", "err", err)
+			audioTrack.PacketsReceived.Add(1)
+			packets <- pkt
+		}
+	}()
+
+	slog.Info("Decoding Opus to PCM")
+	for {
+		select {
+		case pkt := <-packets:
+			var sessions map[string]*WHEPSession
+			if sessionsAny := w.WHEPSessionsSnapshot.Load(); sessionsAny != nil {
+				sessions = sessionsAny.(map[string]*WHEPSession)
 			}
 
-			if _, err := file.Write(pcm); err != nil {
-				slog.Error("Error while writing PCM to output file", file, "err", err)
+			packet := track.TrackPacket{
+				Layer:  id,
+				Packet: pkt,
 			}
-		}
 
-		audioTrack.PacketsReceived.Add(1)
+			for _, whepSession := range sessions {
+				whepSession.SendAudioPacket(packet)
+			}
 
-		var sessions map[string]*WHEPSession
-		if sessionsAny := w.WHEPSessionsSnapshot.Load(); sessionsAny != nil {
-			sessions = sessionsAny.(map[string]*WHEPSession)
-		}
+			sb.Push(pkt)
 
-		packet := track.TrackPacket{
-			Layer:  id,
-			Packet: pkt,
-		}
+			// decode each sample to PCM.
+			for {
+				sample := sb.Pop()
+				if sample == nil {
+					break
+				}
 
-		for _, whepSession := range sessions {
-			whepSession.SendAudioPacket(packet)
+				// sample.Data contains the raw opus data
+				if _, _, err := opusToPCM.Decode(sample.Data, pcm); err != nil {
+					slog.Error("Error while decoding raw opus to PCM", "err", err)
+				}
+
+				if _, err := file.Write(pcm); err != nil {
+					slog.Error("Error while writing PCM to output file", file, "err", err)
+				}
+			}
 		}
 	}
+}
+
+func decodeFromSampleBuilder(sb *samplebuilder.SampleBuilder, decoder opus.Decoder, pcm []byte, file *os.File) {
+
 }
 
 // Add a new AudioTrack to the WHIP session

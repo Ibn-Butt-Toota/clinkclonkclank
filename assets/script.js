@@ -1,5 +1,5 @@
 const audioOptions = {
-    channelCount: 1,
+    channelCount: 2,
     autoGainControl: true,
     echoCancellation: true,
     noiseSuppression: true,
