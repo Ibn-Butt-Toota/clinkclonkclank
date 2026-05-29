@@ -1,5 +1,7 @@
 *.pcm
 qwen*
+*.txt
+*.ogg
 
 .vscode
 .DS_Store

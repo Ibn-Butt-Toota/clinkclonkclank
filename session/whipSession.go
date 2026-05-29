@@ -56,14 +56,30 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 	// buffer the packets in the channel because we need to read as fast as we can.
 	packets := make(chan *rtp.Packet, 100)
 
-	// decent, but slow. ~1s delay.
+	// by default, listen and parse. <- enhance via audio cue
+	// upon keyword, stop listening/transcribing.
+	// after output / signal, resume listening/transcribing. <- enhance via using audio cues
+
+	// decent, but slow. ~1s delay. supports streaming. doesn't flush the buffer with a timer though.
 	// build qwen_asr by following the steps here: https://github.com/antirez/qwen-asr
 	// asr := exec.Command("./qwen_asr", "-d", "qwen3-asr-1.7b", "--stdin", "--stream", "--silent", "--enc-window-sec", "2", "--stream-max-new-tokens", "48")
 
-	// parses faster but only once the stdin pipe is completed...
+	// parses faster, but only once the stdin pipe is completed.
 	// `brew install cargo`
-	// `cargo install qwen-asr-cli`
-	asr := exec.Command("qwen-asr", "-d", "qwen3-asr-0.6b", "--stdin", "--stream", "--vad", "--enc-window-sec", "2", "--stream-chunk-sec", "2")
+	// `cargo install qwen-asr-cli` (atm built from my fork)
+
+	// custom configured to pause when not running, waits for `syscall.SIGUSR1` to resume.
+	asr := exec.Command(
+		"./qwen-asr",
+		"-d",
+		"qwen3-asr-0.6b",
+		"--stdin",
+		"--stream",
+		"--silent",
+		"--stream-chunk-sec",
+		"1",
+		// "--debug",
+	)
 
 	pcmToASR, err := asr.StdinPipe()
 	if err != nil {
@@ -71,10 +87,56 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 		return
 	}
 
-	asr.Stdout = os.Stdout
 	asr.Stderr = os.Stdout
 
+	startedASR := false
+	var recording bytes.Buffer
+
+	// write to the recording and the ASR command's stdin
+	stdinMW := io.MultiWriter(pcmToASR, &recording)
+
+	var outBuf asrOutBuffer
+	sawKeyword := make(chan struct{}, 1)
+
+	keywordWatcher := &KeywordWatcher{
+		onKeyword: func() {
+			select {
+			case sawKeyword <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	asr.Stdout = io.MultiWriter(&outBuf, keywordWatcher)
+
 	slog.Info("Beginning to read RTP from the user")
+	asrStage := true
+
+	// at the end we need to clean up the command's stdin
+	defer func() {
+		if closeErr := pcmToASR.Close(); closeErr != nil {
+			slog.Error("Error while closing ASR stdin")
+		}
+
+		// at this point the stream must've stopped, so write the file to memory
+		file, err := os.Create(streamID + ".pcm")
+		if err != nil {
+			return
+		}
+
+		slog.Info("Saving recording: ", "file", file.Name())
+		if _, err := file.Write(recording.Bytes()); err != nil {
+			slog.Error("WHIPSession.audioWriter.writeRecording", "err", err)
+		}
+	}()
+
+	// pocketwatch
+	go func() {
+		select {
+		case <-sawKeyword:
+			asrStage = false
+		}
+	}()
 
 	go func() {
 		for {
@@ -90,21 +152,23 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 				slog.Error("WHIPSession.AudioWriter error while reading rtp packets", "err", readErr)
 			}
 
-			audioTrack.PacketsReceived.Add(1)
-			packets <- pkt
+			// keep receiving and enqueueing packets while we're still in the asr stage
+			if asrStage {
+				audioTrack.PacketsReceived.Add(1)
+				packets <- pkt
+			} else {
+				packets <- nil
+			}
 		}
 	}()
-
-	startedASR := false
-	var recording bytes.Buffer
-	// we want to write to the recording and the ASR command's stdin
-	mw := io.MultiWriter(pcmToASR, &recording)
 
 	slog.Info("Decoding Opus to PCM")
 
 outer:
 	for {
 		select {
+		// this will consume packets as long as we're in the asrStage.
+		// if the asrStage is false OR we received EndOfStream, we will exit.
 		case pkt := <-packets:
 			if pkt == nil {
 				break outer
@@ -138,7 +202,7 @@ outer:
 					slog.Error("Error while decoding raw opus to PCM", "err", err)
 				}
 
-				if _, err := mw.Write(pcm); err != nil {
+				if _, err := stdinMW.Write(pcm); err != nil {
 					slog.Error("Error while writing pcm to ASR.stdin or recording buffer")
 				}
 			}
@@ -157,21 +221,37 @@ outer:
 		}
 	}
 
+	slog.Info("escaped pkt loop")
+
+	// if we get here because asrStage is over, send this text to the second model.
+	if !asrStage {
+		slog.Info("Saving transcript to txt")
+
+		// for now we'll send it to the third model.
+		// write the transcript then call the python file.
+		transcript, err := os.Create("transcript.txt")
+		if err != nil {
+			slog.Error("error while generating transcript", "err", err)
+			return
+		}
+
+		if _, err := transcript.Write(outBuf.buf.Bytes()); err != nil {
+			slog.Error("error unable to write the transcript to the file", "transcript", keywordWatcher.tail, "err", err)
+			return
+		}
+
+		// now lets run the python script that reads from the transcript.
+		slog.Info("Generating TTS")
+		kitten := exec.Command("python", "tts.py")
+
+		// do a blocking run of the tts.
+		if err = kitten.Run(); err != nil {
+			slog.Error("Err when running kitten", "err", err)
+		}
+		slog.Info("TTS created!")
+	}
+
 	slog.Info("Stream done")
-	if closeErr := pcmToASR.Close(); closeErr != nil {
-		slog.Error("Error while closing ASR stdin")
-	}
-
-	// at this point the stream must've stopped, so write the file to memory
-	file, err := os.Create(streamID + ".pcm")
-	if err != nil {
-		return
-	}
-
-	slog.Info("Writing to file", "file", file.Name())
-	if _, err := file.Write(recording.Bytes()); err != nil {
-		slog.Error("WHIPSession.audioWriter.writeRecording", "err", err)
-	}
 }
 
 // Add a new AudioTrack to the WHIP session
