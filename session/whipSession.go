@@ -68,7 +68,7 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 	// `brew install cargo`
 	// `cargo install qwen-asr-cli` (atm built from my fork)
 
-	// custom configured to pause when not running, waits for `syscall.SIGUSR1` to resume.
+	// when we need it to pause we can send a sleep signal, and bring it back via a wake signal.
 	asr := exec.Command(
 		"./qwen-asr",
 		"-d",
@@ -107,7 +107,7 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamID stri
 		},
 	}
 
-	asr.Stdout = io.MultiWriter(&outBuf, keywordWatcher)
+	asr.Stdout = io.MultiWriter(keywordWatcher, &outBuf)
 
 	slog.Info("Beginning to read RTP from the user")
 	asrStage := true
